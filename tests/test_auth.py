@@ -78,6 +78,7 @@ class TestKerberosAuth:
                     headers={"location": "https://zuul.example.com/callback?code=abc"},
                 ),
                 httpx.Response(200),
+                httpx.Response(200),  # verification GET
             ]
         )
 
@@ -120,10 +121,13 @@ class TestKerberosAuth:
             if call_count == 4:
                 return httpx.Response(200)
             # Phase 2: JWT authorize URL → redirect with code
-            return httpx.Response(
-                302,
-                headers={"location": "https://zuul.example.com/callback?code=jwt-code&state=s"},
-            )
+            if call_count == 5:
+                return httpx.Response(
+                    302,
+                    headers={"location": "https://zuul.example.com/callback?code=jwt-code&state=s"},
+                )
+            # Verification GET after auth
+            return httpx.Response(200)
 
         client = AsyncMock(spec=httpx.AsyncClient)
         client.headers = {}
@@ -145,7 +149,12 @@ class TestKerberosAuth:
         from mcp_zuul.auth import kerberos_auth
 
         client = AsyncMock(spec=httpx.AsyncClient)
-        client.get = AsyncMock(return_value=httpx.Response(200))
+        client.get = AsyncMock(
+            side_effect=[
+                httpx.Response(200),  # initial GET: session valid
+                httpx.Response(200),  # verification GET
+            ]
+        )
 
         await kerberos_auth(client, "https://zuul.example.com")
 
@@ -213,10 +222,12 @@ class TestKerberosAuth:
 
         client = AsyncMock(spec=httpx.AsyncClient)
         client.cookies = MagicMock()
+        client.headers = {}
         client.get = AsyncMock(
             side_effect=[
                 httpx.Response(401, headers={"www-authenticate": "Negotiate"}),
                 httpx.Response(200),
+                httpx.Response(200),  # verification GET
             ]
         )
 

@@ -57,8 +57,11 @@ async def kerberos_auth(client: httpx.AsyncClient, base_url: str) -> None:
     max_hops = 10
     url = f"{base_url}/api/tenants"
 
-    # Clear stale session cookies so the OIDC redirect chain starts fresh.
+    # Clear ALL stale auth state so the OIDC redirect chain starts fresh.
+    # Without this, a long-running client accumulates stale cookies and
+    # headers that cause re-auth to silently produce invalid sessions.
     client.cookies.clear()
+    client.headers.pop("authorization", None)
 
     auth_headers: dict[str, str] = {"Accept": "text/html"}
     oidc_params: tuple[str, str, str, str] | None = None
@@ -130,6 +133,18 @@ async def kerberos_auth(client: httpx.AsyncClient, base_url: str) -> None:
     # Phase 2: acquire JWT for admin API endpoints.
     if oidc_params:
         await _acquire_admin_jwt(client, *oidc_params)
+
+    # Verify the session actually works — a stale client can complete
+    # the auth ceremony without establishing a usable session.
+    verify_resp = await client.get(
+        f"{base_url}/api/tenants", follow_redirects=True
+    )
+    if verify_resp.status_code != 200:
+        raise RuntimeError(
+            f"Kerberos auth: session verification failed "
+            f"(status {verify_resp.status_code} after auth). "
+            f"Try restarting the MCP server or running kinit."
+        )
 
 
 async def _acquire_admin_jwt(
