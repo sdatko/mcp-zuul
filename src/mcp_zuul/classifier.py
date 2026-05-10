@@ -255,7 +255,10 @@ def classify_failure(
         # Use inner failure details for a more specific reason
         inner_list = first.get("inner_failures") or []
         if inner_list:
-            inner = inner_list[0]
+            # Last inner failure is the most likely root cause: in Ansible
+            # block/rescue, rescued tasks fail early and execution continues;
+            # the truly fatal task is always last.
+            inner = inner_list[-1]
             inner_task = inner.get("task", "")
             inner_msg = (inner.get("msg") or inner.get("raw") or "")[:100]
             reason = f"Inner playbook: '{inner_task}' failed: {inner_msg}".rstrip()
@@ -348,8 +351,9 @@ def _collect_error_text(failed_tasks: list[dict[str, Any]]) -> str:
             _add(t.get(field))
             if size >= _MAX_ERROR_TEXT:
                 return " ".join(parts)
-        # Inner failures from nested ansible playbooks
-        for inner in t.get("inner_failures") or []:
+        # Inner failures last-first: the real root cause (last fatal before
+        # PLAY RECAP) gets priority before size cap.
+        for inner in reversed(t.get("inner_failures") or []):
             if size >= _MAX_ERROR_TEXT:
                 break
             for field in ("msg", "stderr_excerpt", "cmd", "raw"):

@@ -1155,3 +1155,42 @@ class TestExtractInnerFailures:
         result = extract_inner_failures(text, max_failures=3, _pre_stripped=True)
         assert result is not None
         assert len(result) == 3
+
+    def test_caps_preserves_last_entry(self):
+        """When max_failures caps results, the LAST fatal block must be included."""
+        from mcp_zuul.parsers import extract_inner_failures
+
+        lines = []
+        for i in range(10):
+            lines.append(f"TASK [task_{i}] ****")
+            lines.append(f'fatal: [host]: FAILED! => {{"msg": "err {i}"}}')
+        text = "\n".join(lines) + "\n"
+        result = extract_inner_failures(text, max_failures=3, _pre_stripped=True)
+        assert result is not None
+        assert len(result) == 3
+        assert result[0]["msg"] == "err 0"
+        assert result[1]["msg"] == "err 1"
+        assert result[-1]["msg"] == "err 9"
+
+
+class TestParseRescuedCount:
+    def test_extracts_rescued_count(self):
+        from mcp_zuul.parsers import parse_rescued_count
+
+        recap = "localhost : ok=74 changed=30 unreachable=0 failed=1 skipped=29 rescued=4 ignored=0"
+        assert parse_rescued_count(recap) == 4
+
+    def test_zero_rescued(self):
+        from mcp_zuul.parsers import parse_rescued_count
+
+        assert parse_rescued_count("localhost : ok=10 failed=1 rescued=0") == 0
+
+    def test_no_rescued_field(self):
+        from mcp_zuul.parsers import parse_rescued_count
+
+        assert parse_rescued_count("localhost : ok=10 failed=1") == 0
+
+    def test_none_input(self):
+        from mcp_zuul.parsers import parse_rescued_count
+
+        assert parse_rescued_count(None) == 0

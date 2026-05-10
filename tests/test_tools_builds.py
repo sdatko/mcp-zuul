@@ -1057,6 +1057,66 @@ class TestInnerFailures:
         assert "inner_failures" not in ft
 
 
+class TestInnerFailuresRescued:
+    """Rescued tasks in inner_failures should not be reported as root cause."""
+
+    @respx.mock
+    async def test_rescued_tasks_not_used_as_root_cause(self, mock_ctx):
+        """With rescued=3, the classifier should use the last inner failure."""
+        build = make_build(result="FAILURE")
+        inner_ansible = (
+            "TASK [rhsm : Check status] ****\n"
+            'fatal: [localhost]: FAILED! => {"msg": "not registered"}\n'
+            "TASK [net : Deactivate default] ****\n"
+            'fatal: [localhost]: FAILED! => {"msg": "network error"}\n'
+            "TASK [net : Set bridge IP] ****\n"
+            'fatal: [localhost]: FAILED! => {"msg": "bridge conflict"}\n'
+            "TASK [libvirt : Wait for SSH] ****\n"
+            'fatal: [localhost]: FAILED! => {"msg": "SSH timeout after 600s"}\n'
+            "PLAY RECAP *******\n"
+            "localhost : ok=50 changed=20 unreachable=0 failed=1 skipped=10 rescued=3 ignored=0\n"
+        )
+        job_output = [
+            {
+                "phase": "run",
+                "playbook": "run.yml",
+                "plays": [
+                    {
+                        "play": {"name": "Run"},
+                        "tasks": [
+                            {
+                                "task": {"name": "Run ansible in container"},
+                                "hosts": {
+                                    "controller": {
+                                        "failed": True,
+                                        "rc": 2,
+                                        "msg": "non-zero return code",
+                                        "stdout": inner_ansible,
+                                        "stderr": "",
+                                    }
+                                },
+                            }
+                        ],
+                    }
+                ],
+                "stats": {"controller": {"failures": 1}},
+            }
+        ]
+        respx.get("https://zuul.example.com/api/tenant/test-tenant/build/fail-uuid").mock(
+            return_value=httpx.Response(200, json=build)
+        )
+        respx.get(f"{build['log_url']}job-output.json.gz").mock(
+            return_value=httpx.Response(200, json=job_output)
+        )
+        result = json.loads(await diagnose_build(mock_ctx, uuid="fail-uuid"))
+        ft = result["failed_tasks"][0]
+        assert ft["rescued_count"] == 3
+        assert len(ft["inner_failures"]) == 4
+        assert ft["inner_failures"][-1]["task"] == "libvirt : Wait for SSH"
+        assert "Wait for SSH" in result["classification_reason"]
+        assert "rhsm" not in result["classification_reason"]
+
+
 class TestGetBuildFailuresDecodingError:
     @respx.mock
     async def test_decoding_error_gz_falls_back_to_json(self, mock_ctx):

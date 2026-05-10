@@ -290,6 +290,61 @@ class TestCollectErrorTextSizeCap:
         assert len(result) <= _MAX_ERROR_TEXT + 2000  # one chunk overshoot is acceptable
 
 
+class TestRescuedTaskClassification:
+    """Rescued inner failures should not dominate classification."""
+
+    def test_uses_last_inner_failure_not_first(self):
+        """With rescued tasks, the LAST entry is the root cause."""
+        tasks = [
+            {
+                "msg": "non-zero return code",
+                "task": "Run playbook in container",
+                "inner_failures": [
+                    {"host": "localhost", "task": "Check rhsm status", "msg": "not registered"},
+                    {"host": "localhost", "task": "Deactivate network", "msg": "network error"},
+                    {"host": "localhost", "task": "Register system", "msg": "registration failed"},
+                    {"host": "localhost", "task": "Activate network", "msg": "activation failed"},
+                    {"host": "localhost", "task": "Wait for SSH", "msg": "SSH timeout after 600s"},
+                ],
+                "rescued_count": 4,
+            }
+        ]
+        result = classify_failure("FAILURE", tasks, [])
+        assert result.category == "REAL_FAILURE"
+        assert "Wait for SSH" in result.reason
+        assert "rhsm" not in result.reason
+
+    def test_single_inner_failure_still_works(self):
+        tasks = [
+            {
+                "msg": "non-zero return code",
+                "task": "Run playbook",
+                "inner_failures": [
+                    {"host": "localhost", "task": "Deploy app", "msg": "deploy failed"},
+                ],
+            }
+        ]
+        result = classify_failure("FAILURE", tasks, [])
+        assert "Deploy app" in result.reason
+
+    def test_infra_pattern_in_last_inner_failure(self):
+        """Infra pattern in last inner failure → INFRA_FLAKE."""
+        tasks = [
+            {
+                "msg": "non-zero return code",
+                "task": "Run playbook in container",
+                "inner_failures": [
+                    {"host": "localhost", "task": "Register rhsm", "msg": "registration error"},
+                    {"host": "localhost", "task": "Wait for node", "msg": "Connection timed out"},
+                ],
+                "rescued_count": 1,
+            }
+        ]
+        result = classify_failure("FAILURE", tasks, [])
+        assert result.category == "INFRA_FLAKE"
+        assert "timed out" in result.reason.lower()
+
+
 class TestDetermineFailurePhase:
     def test_run_phase_failure(self):
         playbooks = [

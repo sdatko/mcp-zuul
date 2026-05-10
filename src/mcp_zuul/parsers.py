@@ -72,6 +72,17 @@ def extract_inner_recap(text: str, *, _pre_stripped: bool = False) -> str | None
     return "\n".join(recap_lines)
 
 
+_RESCUED_RE = re.compile(r"rescued=(\d+)")
+
+
+def parse_rescued_count(inner_recap: str | None) -> int:
+    """Extract ``rescued=N`` count from a PLAY RECAP string."""
+    if not inner_recap:
+        return 0
+    m = _RESCUED_RE.search(inner_recap)
+    return int(m.group(1)) if m else 0
+
+
 def extract_inner_failures(
     text: str, *, max_failures: int = 5, _pre_stripped: bool = False
 ) -> list[dict] | None:
@@ -106,16 +117,13 @@ def extract_inner_failures(
             name = tname
         return name
 
-    failures: list[dict] = []
+    all_entries: list[dict] = []
     for m in _ANSIBLE_FATAL_RE.finditer(cleaned):
-        if len(failures) >= max_failures:
-            break
         host = m.group(1)
         json_str = m.group(2).strip()
         task_name = _find_task_name(m.start())
 
         entry: dict = {"host": host, "task": task_name}
-        # Try to parse the JSON payload after =>
         try:
             data = json.loads(json_str)
             if isinstance(data, dict):
@@ -125,17 +133,21 @@ def extract_inner_failures(
                         if isinstance(val, str) and len(val) > 500:
                             val = val[:500] + "..."
                         entry[key] = val
-                # Include a stderr excerpt if present
                 stderr = data.get("stderr", "")
                 if isinstance(stderr, str) and stderr:
                     entry["stderr_excerpt"] = stderr[:500]
         except (json.JSONDecodeError, ValueError):
-            # JSON spans multiple lines or is malformed - include raw snippet
             entry["raw"] = json_str[:500]
 
-        failures.append(clean(entry))
+        all_entries.append(clean(entry))
 
-    return failures or None
+    if not all_entries:
+        return None
+    # When capped, keep the LAST entry (most likely root cause in rescued
+    # scenarios) plus first (max_failures - 1) for context.
+    if len(all_entries) <= max_failures:
+        return all_entries
+    return [*all_entries[: max_failures - 1], all_entries[-1]]
 
 
 def extract_errors(text: str, *, max_errors: int = 5, context_chars: int = 200) -> list[str] | None:
@@ -244,8 +256,8 @@ def parse_playbooks(data: list) -> tuple[list[dict], list[dict]]:
                             if msg and raw_stderr and msg in _GENERIC_MSGS:
                                 msg = None
                             inner_recap = extract_inner_recap(raw_stdout, _pre_stripped=True)
-                            # Extract inner failures when recap shows failed > 0
                             inner_failures = None
+                            rescued_count = 0
                             if (
                                 inner_recap
                                 and "failed=" in inner_recap
@@ -254,6 +266,7 @@ def parse_playbooks(data: list) -> tuple[list[dict], list[dict]]:
                                 inner_failures = extract_inner_failures(
                                     raw_stdout, _pre_stripped=True
                                 )
+                                rescued_count = parse_rescued_count(inner_recap)
                             ft = clean(
                                 {
                                     "task": task_name,
@@ -266,6 +279,7 @@ def parse_playbooks(data: list) -> tuple[list[dict], list[dict]]:
                                     "extracted_errors": extracted,
                                     "inner_recap": inner_recap,
                                     "inner_failures": inner_failures,
+                                    "rescued_count": rescued_count or None,
                                     "invocation": _truncate_invocation(
                                         res.get("invocation", {}).get("module_args")
                                     ),
@@ -313,6 +327,7 @@ def grep_log_context(text: str, *, context_lines: int = 3) -> list[list[dict]]:
 # Backward-compatible aliases (tests and tools import underscore-prefixed names)
 _smart_truncate = smart_truncate
 _extract_inner_recap = extract_inner_recap
+_parse_rescued_count = parse_rescued_count
 _extract_errors = extract_errors
 _extract_inner_failures = extract_inner_failures
 _parse_playbooks = parse_playbooks
