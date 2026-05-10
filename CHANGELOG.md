@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-05-11
+
+### Changed
+- `enqueue` tool now supports both change-based and ref-based enqueue in a single tool. The separate `enqueue_ref` tool has been removed. Pass `ref`, `oldrev`, `newrev` parameters to `enqueue` for periodic pipeline re-triggers (total tools: 39 → 38)
+
+### Fixed
+- Kerberos re-auth no longer fails silently when the httpx client has a stale JWT Bearer header. The authorization header is now cleared alongside cookies before re-auth, allowing Apache to fall through to the OIDC redirect flow instead of returning 401 on the stale token
+- `_api_mutate` (POST/DELETE) detects OIDC session-expired redirects (301/302/303) and triggers Kerberos re-auth instead of following the redirect. Without this fix, httpx converted POST to GET on 302, silently losing the request body
+- `diagnose_build` and `get_build_failures` no longer misattribute rescued Ansible tasks as root causes. The classifier now uses the last `inner_failures` entry (the actual play-killer) instead of the first (typically a rescued task). Also fixes `extract_inner_failures` to preserve the last entry when the `max_failures` cap truncates results
+- `reenqueue_buildset` read-only guard is now enforced centrally in `_api_mutate` instead of per-tool, consistent with all other write operations
+
+### Added
+- `reenqueue_buildset` tool: re-enqueue a previous buildset by looking up its project/pipeline/ref and enqueuing it again. Useful for re-triggering periodic pipeline runs
+- OIDC state parameter validation on JWT auth code callback prevents CSRF-style code injection during the Kerberos OIDC flow
+- Session verification GET after Kerberos auth catches silent auth failures (e.g. stale client state producing an invalid session)
+- JWT acquisition failures are isolated with try/except so Phase 2 (JWT) crashes don't prevent Phase 1 (session cookies) from completing. Read-only operations continue working even if JWT acquisition fails
+- `parse_rescued_count()` extracts the `rescued=N` count from Ansible PLAY RECAP strings. The `rescued_count` field is included in `diagnose_build` and `get_build_failures` output when non-zero
+
+### Security
+- OIDC auth code extraction now uses proper query parameter parsing (`parse_qs`) instead of substring matching on the full redirect URL
+- OIDC state parameter is validated against the expected value before exchanging the auth code for a JWT
+
 ## [0.6.1] - 2026-04-27
 
 ### Fixed
