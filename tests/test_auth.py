@@ -2,7 +2,7 @@
 
 import base64
 import sys
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -91,7 +91,8 @@ class TestKerberosAuth:
         expected_token = base64.b64encode(b"spnego-token-bytes").decode()
         assert auth_header == f"Negotiate {expected_token}"
 
-    async def test_phase1_then_phase2_jwt(self, mock_gssapi):
+    @patch("mcp_zuul.auth.secrets.token_urlsafe", return_value="fixed-state")
+    async def test_phase1_then_phase2_jwt(self, _mock_secrets, mock_gssapi):
         """Full flow: OIDC redirect → SPNEGO → session → JWT acquisition."""
         from mcp_zuul.auth import kerberos_auth
 
@@ -120,11 +121,15 @@ class TestKerberosAuth:
                 )
             if call_count == 4:
                 return httpx.Response(200)
-            # Phase 2: JWT authorize URL → redirect with code
+            # Phase 2: JWT authorize URL → redirect with code (state must match)
             if call_count == 5:
                 return httpx.Response(
                     302,
-                    headers={"location": "https://zuul.example.com/callback?code=jwt-code&state=s"},
+                    headers={
+                        "location": (
+                            "https://zuul.example.com/callback?code=jwt-code&state=fixed-state"
+                        )
+                    },
                 )
             # Verification GET after auth
             return httpx.Response(200)
@@ -157,6 +162,46 @@ class TestKerberosAuth:
         )
 
         await kerberos_auth(client, "https://zuul.example.com")
+
+    async def test_200_early_return_jwt_crash_still_verifies(self, mock_gssapi):
+        """JWT crash on the 200 early-return path doesn't kill auth."""
+        from mcp_zuul.auth import kerberos_auth
+
+        oidc_url = (
+            "https://sso.example.com/realms/zuul/protocol/openid-connect/auth"
+            "?client_id=zuul&redirect_uri=https%3A%2F%2Fzuul.example.com%2Fcallback"
+        )
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.headers = {}
+        client.get = AsyncMock(
+            side_effect=[
+                httpx.Response(302, headers={"location": oidc_url}),
+                httpx.Response(200),  # SSO 200 → early-return path with oidc_params
+                # _acquire_admin_jwt: malformed 302 → crash
+                httpx.Response(302),
+                httpx.Response(200),  # verification GET: session valid
+            ]
+        )
+
+        await kerberos_auth(client, "https://zuul.example.com")
+        assert "authorization" not in client.headers
+
+    async def test_200_from_intermediate_redirect_caught_by_verification(self, mock_gssapi):
+        """If redirect chain ends at 200 (not from Zuul), verification catches it."""
+        from mcp_zuul.auth import kerberos_auth
+
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.headers = {}
+        client.get = AsyncMock(
+            side_effect=[
+                httpx.Response(302, headers={"location": "https://sso.example.com/login"}),
+                httpx.Response(200),  # SSO returned 200 (cached session, HTML page)
+                httpx.Response(302),  # verification GET: Zuul redirects (no valid session)
+            ]
+        )
+
+        with pytest.raises(RuntimeError, match=r"session verification failed.*302"):
+            await kerberos_auth(client, "https://zuul.example.com")
 
     async def test_unexpected_status_raises(self, mock_gssapi):
         """Non-200, non-401 status raises RuntimeError."""
@@ -234,6 +279,58 @@ class TestKerberosAuth:
         await kerberos_auth(client, "https://zuul.example.com")
         client.cookies.clear.assert_called_once()
 
+    async def test_verification_get_failure_raises(self, mock_gssapi):
+        """Session verification after auth detects stale sessions."""
+        from mcp_zuul.auth import kerberos_auth
+
+        mock_ctx = MagicMock()
+        mock_ctx.step.return_value = b"token"
+        mock_gssapi.SecurityContext.return_value = mock_ctx
+
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.cookies = MagicMock()
+        client.headers = {}
+        client.get = AsyncMock(
+            side_effect=[
+                httpx.Response(401, headers={"www-authenticate": "Negotiate"}),
+                httpx.Response(200),  # SPNEGO accepted
+                httpx.Response(302),  # verification GET: session not valid
+            ]
+        )
+
+        with pytest.raises(RuntimeError, match=r"session verification failed.*302"):
+            await kerberos_auth(client, "https://zuul.example.com")
+
+    @patch("mcp_zuul.auth.secrets.token_urlsafe", return_value="fixed-state")
+    async def test_jwt_crash_does_not_kill_session_auth(self, _mock_secrets, mock_gssapi):
+        """JWT acquisition failure should not prevent session-based auth."""
+        from mcp_zuul.auth import kerberos_auth
+
+        mock_ctx = MagicMock()
+        mock_ctx.step.return_value = b"token"
+        mock_gssapi.SecurityContext.return_value = mock_ctx
+
+        oidc_url = (
+            "https://sso.example.com/realms/zuul/protocol/openid-connect/auth"
+            "?client_id=zuul&redirect_uri=https%3A%2F%2Fzuul.example.com%2Fcallback"
+        )
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.cookies = MagicMock()
+        client.headers = {}
+        client.get = AsyncMock(
+            side_effect=[
+                httpx.Response(302, headers={"location": oidc_url}),
+                httpx.Response(401, headers={"www-authenticate": "Negotiate"}),
+                httpx.Response(200),  # SPNEGO accepted
+                # _acquire_admin_jwt: SSO returns malformed 302 (no Location)
+                httpx.Response(302),
+                httpx.Response(200),  # verification GET: session is valid
+            ]
+        )
+
+        await kerberos_auth(client, "https://zuul.example.com")
+        assert "authorization" not in client.headers
+
 
 class TestExtractOidcParams:
     """Tests for _extract_oidc_params URL parsing."""
@@ -278,12 +375,18 @@ class TestAcquireAdminJwt:
     assert _OIDC_PARAMS is not None
     _CLIENT_ID, _REDIRECT_URI, _TOKEN_URL, _AUTHORIZE_URL = _OIDC_PARAMS
 
-    async def test_acquires_jwt_and_sets_header(self, mock_gssapi):
+    _FIXED_STATE = "fixed-state"
+    _SECRETS_PATCH = patch("mcp_zuul.auth.secrets.token_urlsafe", return_value=_FIXED_STATE)
+
+    @_SECRETS_PATCH
+    async def test_acquires_jwt_and_sets_header(self, _mock_secrets, mock_gssapi):
         from mcp_zuul.auth import _acquire_admin_jwt
 
         client = AsyncMock(spec=httpx.AsyncClient)
         client.headers = {}
-        callback_url = "https://zuul.example.com/callback?code=auth-code-123&state=xyz"
+        callback_url = (
+            f"https://zuul.example.com/callback?code=auth-code-123&state={self._FIXED_STATE}"
+        )
         client.get = AsyncMock(return_value=httpx.Response(302, headers={"location": callback_url}))
         client.post = AsyncMock(
             return_value=httpx.Response(
@@ -315,7 +418,8 @@ class TestAcquireAdminJwt:
 
         assert "authorization" not in client.headers
 
-    async def test_warns_on_token_endpoint_error(self, mock_gssapi):
+    @_SECRETS_PATCH
+    async def test_warns_on_token_endpoint_error(self, _mock_secrets, mock_gssapi):
         from mcp_zuul.auth import _acquire_admin_jwt
 
         client = AsyncMock(spec=httpx.AsyncClient)
@@ -323,7 +427,11 @@ class TestAcquireAdminJwt:
         client.get = AsyncMock(
             return_value=httpx.Response(
                 302,
-                headers={"location": "https://zuul.example.com/callback?code=c1&state=s"},
+                headers={
+                    "location": (
+                        f"https://zuul.example.com/callback?code=c1&state={self._FIXED_STATE}"
+                    )
+                },
             )
         )
         client.post = AsyncMock(return_value=httpx.Response(500, text="Internal Server Error"))
@@ -334,7 +442,8 @@ class TestAcquireAdminJwt:
 
         assert "authorization" not in client.headers
 
-    async def test_warns_on_non_json_token_response(self, mock_gssapi):
+    @_SECRETS_PATCH
+    async def test_warns_on_non_json_token_response(self, _mock_secrets, mock_gssapi):
         from mcp_zuul.auth import _acquire_admin_jwt
 
         client = AsyncMock(spec=httpx.AsyncClient)
@@ -342,7 +451,11 @@ class TestAcquireAdminJwt:
         client.get = AsyncMock(
             return_value=httpx.Response(
                 302,
-                headers={"location": "https://zuul.example.com/callback?code=c1&state=s"},
+                headers={
+                    "location": (
+                        f"https://zuul.example.com/callback?code=c1&state={self._FIXED_STATE}"
+                    )
+                },
             )
         )
         client.post = AsyncMock(return_value=httpx.Response(200, text="not json"))
@@ -353,7 +466,8 @@ class TestAcquireAdminJwt:
 
         assert "authorization" not in client.headers
 
-    async def test_warns_on_missing_access_token(self, mock_gssapi):
+    @_SECRETS_PATCH
+    async def test_warns_on_missing_access_token(self, _mock_secrets, mock_gssapi):
         from mcp_zuul.auth import _acquire_admin_jwt
 
         client = AsyncMock(spec=httpx.AsyncClient)
@@ -361,7 +475,11 @@ class TestAcquireAdminJwt:
         client.get = AsyncMock(
             return_value=httpx.Response(
                 302,
-                headers={"location": "https://zuul.example.com/callback?code=c1&state=s"},
+                headers={
+                    "location": (
+                        f"https://zuul.example.com/callback?code=c1&state={self._FIXED_STATE}"
+                    )
+                },
             )
         )
         client.post = AsyncMock(return_value=httpx.Response(200, json={"token_type": "Bearer"}))
@@ -372,7 +490,8 @@ class TestAcquireAdminJwt:
 
         assert "authorization" not in client.headers
 
-    async def test_handles_spnego_renegotiate_in_jwt_flow(self, mock_gssapi):
+    @_SECRETS_PATCH
+    async def test_handles_spnego_renegotiate_in_jwt_flow(self, _mock_secrets, mock_gssapi):
         """SSO requests Kerberos re-negotiate during JWT acquisition."""
         from mcp_zuul.auth import _acquire_admin_jwt
 
@@ -389,7 +508,10 @@ class TestAcquireAdminJwt:
                 httpx.Response(
                     302,
                     headers={
-                        "location": "https://zuul.example.com/callback?code=renegotiated&state=s"
+                        "location": (
+                            "https://zuul.example.com/callback"
+                            f"?code=renegotiated&state={self._FIXED_STATE}"
+                        )
                     },
                 ),
             ]
@@ -421,6 +543,29 @@ class TestAcquireAdminJwt:
                 httpx.Response(302, headers={"location": "https://sso.example.com/negotiate"}),
                 httpx.Response(401, headers={"www-authenticate": "Negotiate"}),
             ]
+        )
+
+        await _acquire_admin_jwt(
+            client, self._CLIENT_ID, self._REDIRECT_URI, self._TOKEN_URL, self._AUTHORIZE_URL
+        )
+
+        assert "authorization" not in client.headers
+        client.post.assert_not_called()
+
+    @_SECRETS_PATCH
+    async def test_state_mismatch_rejects_code(self, _mock_secrets, mock_gssapi):
+        """OIDC state mismatch aborts JWT acquisition (CSRF protection)."""
+        from mcp_zuul.auth import _acquire_admin_jwt
+
+        client = AsyncMock(spec=httpx.AsyncClient)
+        client.headers = {}
+        client.get = AsyncMock(
+            return_value=httpx.Response(
+                302,
+                headers={
+                    "location": "https://zuul.example.com/callback?code=stolen&state=wrong-state"
+                },
+            )
         )
 
         await _acquire_admin_jwt(

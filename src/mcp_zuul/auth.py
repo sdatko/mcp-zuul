@@ -81,7 +81,17 @@ async def kerberos_auth(client: httpx.AsyncClient, base_url: str) -> None:
     if resp.status_code == 200:
         log.info("Kerberos auth: session still valid after cookie clear")
         if oidc_params:
-            await _acquire_admin_jwt(client, *oidc_params)
+            try:
+                await _acquire_admin_jwt(client, *oidc_params)
+            except Exception:
+                log.warning("JWT acquisition failed (admin API may not work)", exc_info=True)
+        verify_resp = await client.get(f"{base_url}/api/tenants", follow_redirects=True)
+        if verify_resp.status_code != 200:
+            raise RuntimeError(
+                f"Kerberos auth: session verification failed "
+                f"(status {verify_resp.status_code} after auth). "
+                f"Try restarting the MCP server or running kinit."
+            )
         return
     if resp.status_code != 401:
         raise RuntimeError(
@@ -132,13 +142,14 @@ async def kerberos_auth(client: httpx.AsyncClient, base_url: str) -> None:
 
     # Phase 2: acquire JWT for admin API endpoints.
     if oidc_params:
-        await _acquire_admin_jwt(client, *oidc_params)
+        try:
+            await _acquire_admin_jwt(client, *oidc_params)
+        except Exception:
+            log.warning("JWT acquisition failed (admin API may not work)", exc_info=True)
 
     # Verify the session actually works — a stale client can complete
     # the auth ceremony without establishing a usable session.
-    verify_resp = await client.get(
-        f"{base_url}/api/tenants", follow_redirects=True
-    )
+    verify_resp = await client.get(f"{base_url}/api/tenants", follow_redirects=True)
     if verify_resp.status_code != 200:
         raise RuntimeError(
             f"Kerberos auth: session verification failed "
@@ -164,12 +175,13 @@ async def _acquire_admin_jwt(
     import gssapi
 
     # Build a fresh OIDC authorize URL with new state/nonce.
+    expected_state = secrets.token_urlsafe(24)
     params = {
         "response_type": "code",
         "scope": "openid profile roles",
         "client_id": client_id,
         "redirect_uri": redirect_uri,
-        "state": secrets.token_urlsafe(24),
+        "state": expected_state,
         "nonce": secrets.token_urlsafe(24),
     }
     url = f"{authorize_url}?{urlencode(params)}"
@@ -183,10 +195,19 @@ async def _acquire_admin_jwt(
         location = _follow_redirect(resp)
         if not location:
             break
-        if "code=" in location:
-            code = parse_qs(urlparse(location).query).get("code", [None])[0]
-            if code:
-                break
+        qs = parse_qs(urlparse(location).query)
+        location_code = qs.get("code", [None])[0]
+        if location_code:
+            returned_state = qs.get("state", [None])[0]
+            if returned_state != expected_state:
+                log.warning(
+                    "JWT acquisition: OIDC state mismatch (expected %s, got %s)",
+                    expected_state,
+                    returned_state,
+                )
+                return
+            code = location_code
+            break
         # If SSO needs Kerberos negotiate again, handle it.
         resp = await client.get(location, follow_redirects=False)
         if resp.status_code == 401:

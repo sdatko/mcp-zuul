@@ -118,10 +118,10 @@ async def _api_mutate(ctx: Context, method: str, path: str, body: dict | None = 
         raise ValueError("Write operations disabled (ZUUL_READ_ONLY=true)")
     url = f"{a.config.base_url}/api{path}"
 
-    def _send():
+    async def _send():
         if method == "POST":
-            return a.client.post(url, json=body, follow_redirects=False)
-        return a.client.delete(url, follow_redirects=False)
+            return await a.client.post(url, json=body, follow_redirects=False)
+        return await a.client.delete(url, follow_redirects=False)
 
     for attempt in range(2):
         resp = await _send()

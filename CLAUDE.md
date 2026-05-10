@@ -63,7 +63,7 @@ classifier.py      →  Failure classification (INFRA_FLAKE, REAL_FAILURE, CONFI
 ### Key Patterns
 
 - **Two httpx clients**: `client` (API calls, has base_url + `_BearerAuth`) and `log_client` (log file fetches from external hosts, no base_url/auth). Both created in `server.py:lifespan`. `_pick_client()` selects based on log host vs API host.
-- **Auth safety**: `_BearerAuth` (httpx.Auth subclass) ensures tokens are stripped on cross-origin redirects. An `asyncio.Lock` (`_auth_lock` on AppContext) serializes Kerberos re-auth to prevent concurrent session corruption.
+- **Auth safety**: `_BearerAuth` (httpx.Auth subclass) ensures tokens are stripped on cross-origin redirects. An `asyncio.Lock` (`_auth_lock` on AppContext) serializes Kerberos re-auth to prevent concurrent session corruption. `kerberos_auth()` clears BOTH cookies AND the `authorization` header before re-auth — a stale JWT causes Apache to return 401 (rejecting the bad token) instead of 302 (OIDC redirect), which silently breaks the entire SPNEGO flow. A verification GET after auth catches silent failures.
 - **Streaming with size caps**: `fetch_log_url()` streams up to 20 MB (prevents unbounded memory from large `job-output.json`). `stream_log()` streams up to 10 MB and returns `(bytes, truncated_bool)` so callers can warn users.
 - **AppContext**: Injected via FastMCP lifespan, accessed in tools via `app(ctx)` helper. Holds both clients, config, and the auth lock.
 - **Tenant resolution**: Every tool accepts optional `tenant` param; `helpers.tenant()` falls back to `ZUUL_DEFAULT_TENANT` env var.

@@ -318,6 +318,20 @@ class TestApiMutateKerberosReauth:
             await api_post(krb_ctx, "/tenant/test-tenant/enqueue", {"change": "1"})
         assert exc_info.value.response.status_code == 302
 
+    @respx.mock
+    async def test_delete_redirect_triggers_reauth(self, krb_ctx):
+        """DELETE 302 (OIDC redirect) → re-auth → retry DELETE → 200."""
+        route = respx.delete("https://zuul.example.com/api/tenant/test-tenant/autohold/42")
+        route.side_effect = [
+            httpx.Response(302, headers={"location": "https://sso.example.com/auth"}),
+            httpx.Response(200, text=""),
+        ]
+        with patch("mcp_zuul.helpers.kerberos_auth", new_callable=AsyncMock) as mock_auth:
+            result = await api_delete(krb_ctx, "/tenant/test-tenant/autohold/42")
+
+        assert result == {}
+        mock_auth.assert_awaited_once()
+
 
 # ---------------------------------------------------------------------------
 # _stream_response() re-auth (via fetch_log_url / stream_log)
