@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import zlib
+from urllib.parse import urlparse
 
 import httpx
 from mcp.server.fastmcp import Context
@@ -69,6 +70,18 @@ _DESTRUCTIVE = ToolAnnotations(
 )
 
 
+def _check_url_host(ctx: Context, url: str) -> None:
+    """Reject URLs that point to a different Zuul instance than configured."""
+    url_host = urlparse(url).hostname or ""
+    cfg_host = urlparse(app(ctx).config.base_url).hostname or ""
+    if url_host and cfg_host and url_host != cfg_host:
+        raise ValueError(
+            f"URL points to a different Zuul instance ({url_host}) "
+            f"than this server ({cfg_host}). "
+            f"Use the MCP server configured for {url_host}."
+        )
+
+
 def _resolve(
     ctx: Context, uuid: str, tenant: str, url: str, kind: str = "build"
 ) -> tuple[str, str]:
@@ -80,6 +93,7 @@ def _resolve(
         url_tenant, url_kind, url_id = parts
         if url_kind != kind:
             raise ValueError(f"Expected {kind} URL, got {url_kind}")
+        _check_url_host(ctx, url)
         return url_id, _tenant(ctx, tenant or url_tenant)
     if not uuid:
         raise ValueError(f"{kind} identifier or url is required")
@@ -104,7 +118,9 @@ def _no_log_url_error(build: dict, uuid: str) -> str:
         detail = build.get("error_detail")
         msg = (
             f"Build {uuid} is still in progress — "
-            "logs not yet available (uploaded after post-run completes)."
+            "logs not yet available (uploaded after post-run completes). "
+            "Note: IN_PROGRESS covers both actively running and "
+            "post-run (log collection) phases."
         )
         if detail:
             msg += f" Error detail: {detail}"

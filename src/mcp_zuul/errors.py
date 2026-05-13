@@ -58,7 +58,14 @@ def handle_errors(
             return await func(*args, **kwargs)
         except httpx.HTTPStatusError as e:
             body = _clean_body(e.response.text)
-            return error(f"API returned {e.response.status_code}: {body}")
+            msg = f"API returned {e.response.status_code}: {body}"
+            if e.response.status_code == 404:
+                host = e.request.url.host
+                msg += (
+                    f" (on {host} — if this resource is from a different "
+                    f"Zuul instance, use the corresponding MCP server)"
+                )
+            return error(msg)
         except httpx.DecodingError:
             return error(
                 "Log file decompression failed (corrupted gzip). "

@@ -23,7 +23,7 @@ from ..formatters import (
 from ..helpers import api, app, clean, error, parse_zuul_url, safepath
 from ..helpers import tenant as _tenant
 from ..server import mcp
-from ._common import _READ_ONLY
+from ._common import _READ_ONLY, _check_url_host
 
 log = logging.getLogger("zuul-mcp")
 
@@ -187,6 +187,7 @@ async def get_change_status(
         url_tenant, url_kind, url_id = parts
         if url_kind != "change":
             raise ValueError(f"Expected change URL, got {url_kind}")
+        _check_url_host(ctx, url)
         change = url_id.split(",")[0] if "," in url_id else url_id
         tenant = tenant or url_tenant
     if not change:

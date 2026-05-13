@@ -146,6 +146,140 @@ class TestParseZuulUrl:
         assert parse_zuul_url("just-a-string") is None
 
 
+class TestResolve:
+    """Tests for _resolve() URL hostname validation and resource resolution."""
+
+    def _make_ctx(self, base_url="https://zuul.example.com"):
+        """Create a mock context with a given base_url."""
+        from unittest.mock import MagicMock
+
+        from mcp_zuul.config import Config
+        from mcp_zuul.helpers import AppContext
+
+        config = Config(
+            base_url=base_url,
+            default_tenant="test-tenant",
+            auth_token=None,
+            timeout=30,
+            verify_ssl=True,
+            use_kerberos=False,
+            transport="stdio",
+            enabled_tools=None,
+            disabled_tools=None,
+            host="127.0.0.1",
+            port=8000,
+            read_only=False,
+            logjuicer_url=None,
+        )
+        app_ctx = AppContext(client=MagicMock(), log_client=MagicMock(), config=config)
+        ctx = MagicMock()
+        ctx.request_context.lifespan_context = app_ctx
+        return ctx
+
+    def test_url_matching_hostname_resolves(self):
+        from mcp_zuul.tools._common import _resolve
+
+        ctx = self._make_ctx("https://zuul.example.com")
+        uuid, t = _resolve(ctx, "", "", "https://zuul.example.com/t/my-tenant/build/abc123")
+        assert uuid == "abc123"
+        assert t == "my-tenant"
+
+    def test_url_matching_hostname_with_zuul_prefix(self):
+        from mcp_zuul.tools._common import _resolve
+
+        ctx = self._make_ctx("https://sf.example.com/zuul")
+        uuid, t = _resolve(ctx, "", "", "https://sf.example.com/zuul/t/ci/build/def456")
+        assert uuid == "def456"
+        assert t == "ci"
+
+    def test_url_mismatched_hostname_raises(self):
+        from mcp_zuul.tools._common import _resolve
+
+        ctx = self._make_ctx("https://zuul.example.com")
+        with pytest.raises(ValueError, match="different Zuul instance"):
+            _resolve(
+                ctx,
+                "",
+                "",
+                "https://other-zuul.example.com/t/tenant/build/abc123",
+            )
+
+    def test_url_mismatched_hostname_includes_both_hosts(self):
+        from mcp_zuul.tools._common import _resolve
+
+        ctx = self._make_ctx("https://zuul.example.com")
+        with pytest.raises(ValueError) as exc_info:
+            _resolve(
+                ctx,
+                "",
+                "",
+                "https://sf.internal.com/zuul/t/tenant/build/abc123",
+            )
+        msg = str(exc_info.value)
+        assert "sf.internal.com" in msg
+        assert "zuul.example.com" in msg
+
+    def test_uuid_only_bypasses_hostname_check(self):
+        from mcp_zuul.tools._common import _resolve
+
+        ctx = self._make_ctx("https://zuul.example.com")
+        uuid, t = _resolve(ctx, "some-uuid", "my-tenant", "")
+        assert uuid == "some-uuid"
+        assert t == "my-tenant"
+
+    def test_url_wrong_kind_raises(self):
+        from mcp_zuul.tools._common import _resolve
+
+        ctx = self._make_ctx("https://zuul.example.com")
+        with pytest.raises(ValueError, match="Expected build URL, got buildset"):
+            _resolve(
+                ctx,
+                "",
+                "",
+                "https://zuul.example.com/t/tenant/buildset/abc123",
+                kind="build",
+            )
+
+    def test_unparseable_url_raises(self):
+        from mcp_zuul.tools._common import _resolve
+
+        ctx = self._make_ctx("https://zuul.example.com")
+        with pytest.raises(ValueError, match="Cannot parse"):
+            _resolve(ctx, "", "", "https://zuul.example.com/api/tenants")
+
+    def test_neither_uuid_nor_url_raises(self):
+        from mcp_zuul.tools._common import _resolve
+
+        ctx = self._make_ctx("https://zuul.example.com")
+        with pytest.raises(ValueError, match="identifier or url is required"):
+            _resolve(ctx, "", "", "")
+
+    def test_url_with_port_matches(self):
+        from mcp_zuul.tools._common import _resolve
+
+        ctx = self._make_ctx("https://zuul.example.com:8443")
+        uuid, _t = _resolve(
+            ctx,
+            "",
+            "",
+            "https://zuul.example.com:8443/t/tenant/build/abc123",
+        )
+        assert uuid == "abc123"
+
+    def test_url_port_mismatch_still_matches_hostname(self):
+        """Port differences are OK - same host, different proxy."""
+        from mcp_zuul.tools._common import _resolve
+
+        ctx = self._make_ctx("https://zuul.example.com:8443")
+        uuid, _t = _resolve(
+            ctx,
+            "",
+            "",
+            "https://zuul.example.com/t/tenant/build/abc123",
+        )
+        assert uuid == "abc123"
+
+
 class TestParseIsoTimestamp:
     def test_parses_zulu_time(self):
         from datetime import UTC
@@ -400,6 +534,35 @@ class TestHandleErrors:
         assert "diagnose_build" in result["error"]
         # Must NOT contain "Internal error" — it's a known exception
         assert "Internal error" not in result["error"]
+
+    async def test_404_includes_server_hint(self):
+        @handle_errors
+        async def failing():
+            resp = httpx.Response(404, text="Build not found")
+            raise httpx.HTTPStatusError(
+                "",
+                request=httpx.Request("GET", "https://zuul.example.com/api/build/abc"),
+                response=resp,
+            )
+
+        result = json.loads(await failing())
+        assert "404" in result["error"]
+        assert "zuul.example.com" in result["error"]
+        assert "different Zuul" in result["error"]
+
+    async def test_non_404_http_error_no_server_hint(self):
+        @handle_errors
+        async def failing():
+            resp = httpx.Response(403, text="Forbidden")
+            raise httpx.HTTPStatusError(
+                "",
+                request=httpx.Request("GET", "https://zuul.example.com/api/x"),
+                response=resp,
+            )
+
+        result = json.loads(await failing())
+        assert "403" in result["error"]
+        assert "different Zuul" not in result["error"]
 
     async def test_wraps_unexpected(self):
         @handle_errors

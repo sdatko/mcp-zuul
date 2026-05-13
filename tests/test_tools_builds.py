@@ -345,10 +345,21 @@ class TestGetBuildUrl:
         result = json.loads(
             await get_build(
                 mock_ctx,
-                url="https://sf.example.com/zuul/t/comp-int/build/abc123",
+                url="https://zuul.example.com/zuul/t/comp-int/build/abc123",
             )
         )
         assert result["uuid"] == "abc123"
+
+    async def test_url_hostname_mismatch_returns_error(self, mock_ctx):
+        result = json.loads(
+            await get_build(
+                mock_ctx,
+                url="https://other-zuul.example.com/t/tenant/build/abc123",
+            )
+        )
+        assert "error" in result
+        assert "different Zuul instance" in result["error"]
+        assert "other-zuul.example.com" in result["error"]
 
     async def test_invalid_url_returns_error(self, mock_ctx):
         result = json.loads(await get_build(mock_ctx, url="https://example.com/not-a-zuul-url"))

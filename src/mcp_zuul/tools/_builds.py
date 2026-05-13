@@ -221,6 +221,10 @@ async def get_build_failures(
     failing files are part of the change before concluding if a failure is
     change-related or a pre-existing repo issue.
 
+    Note: Ansible tasks with ``no_log: true`` will have empty ``msg``
+    fields in failed_tasks. Use get_build_log with grep to find the
+    actual error text in the raw log output.
+
     Args:
         uuid: Build UUID
         tenant: Tenant name (uses default if empty)

@@ -480,6 +480,17 @@ class TestGetChangeStatus:
         assert "error" in result
         assert "Expected change" in result["error"]
 
+    async def test_url_hostname_mismatch_for_change(self, mock_ctx):
+        result = json.loads(
+            await get_change_status(
+                mock_ctx,
+                url="https://other-zuul.example.com/t/tenant/status/change/12345",
+            )
+        )
+        assert "error" in result
+        assert "different Zuul instance" in result["error"]
+        assert "other-zuul.example.com" in result["error"]
+
     @respx.mock
     async def test_url_strips_comma_sha_from_change_id(self, mock_ctx):
         """Status URLs use 'number,sha' format — only the number is used for API calls."""
