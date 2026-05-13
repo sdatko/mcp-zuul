@@ -40,7 +40,7 @@ __init__.py        →  imports tools, prompts, resources (registers decorators)
 server.py          →  FastMCP instance ("zuul-ci"), lifespan (creates httpx clients), _BearerAuth
 tools/             →  Package: 38 @mcp.tool() functions split by domain
   __init__.py      →  Re-exports for backward compat (tests import from mcp_zuul.tools)
-  _common.py       →  Shared constants, _resolve(), _fetch_job_output(), re-exports from parsers
+  _common.py       →  Shared constants, _check_url_host(), _resolve(), _fetch_job_output(), re-exports from parsers
   _builds.py       →  6 build tools: list_builds, get_build, get_build_failures, diagnose_build, etc.
   _console.py      →  1 console stream tool: stream_build_console (optional, requires websockets)
   _logs.py         →  3 log tools: get_build_log, browse_build_logs, tail_build_log
@@ -68,7 +68,7 @@ classifier.py      →  Failure classification (INFRA_FLAKE, REAL_FAILURE, CONFI
 - **AppContext**: Injected via FastMCP lifespan, accessed in tools via `app(ctx)` helper. Holds both clients, config, and the auth lock.
 - **Tenant resolution**: Every tool accepts optional `tenant` param; `helpers.tenant()` falls back to `ZUUL_DEFAULT_TENANT` env var.
 - **URL-based input**: Build/buildset/change tools accept a `url` param as alternative to `uuid` + `tenant`. `parse_zuul_url()` extracts tenant and resource ID from Zuul web URLs. Supports both multi-tenant (`/t/<tenant>/build/...`) and single-tenant (`/build/...`) URL formats.
-- **`_resolve()`**: Shared helper in tools.py that resolves resource ID + tenant from either explicit params or URL.
+- **`_resolve()`**: Shared helper in _common.py that resolves resource ID + tenant from either explicit params or URL. Used by 12 of 13 `url`-accepting tools. **Exception**: `get_change_status` parses URLs directly (needs comma+SHA stripping and ref pattern matching). Both paths share `_check_url_host()` for hostname validation — any URL validation added to `_resolve()` must also be added to `get_change_status`'s URL parsing block in `_status.py`.
 - **`safepath()`**: URL path sanitization — preserves slashes for Zuul project names (e.g., `org/repo`) but blocks `..` traversal.
 - **`clean()`**: Strips `None` values from dicts to minimize token usage in responses.
 - **All tools return JSON strings**, never raw dicts. Errors also return JSON via `helpers.error()`.
